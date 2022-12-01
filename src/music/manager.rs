@@ -1,3 +1,4 @@
+use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io::Read;
@@ -5,16 +6,12 @@ use std::sync::Arc;
 use serenity::async_trait;
 use serenity::client::Context;
 use serenity::model::channel::Message;
+use serenity::model::guild::Guild;
 use serenity::model::id::GuildId;
 use songbird::{Call, Event, EventContext, EventHandler, Songbird, TrackEvent, ytdl};
-use songbird::input::{Input, Restartable, ytdl_search};
-use tokio::sync::Mutex;
-use tracing_subscriber::fmt::SubscriberBuilder;
-use crate::music::discord::join_guild_channel_from_msg;
-
-lazy_static! {
-    pub static ref registry: Mutex<HashMap<GuildId, Arc<Mutex<MusicManager>>>> = Mutex::new(HashMap::new());
-}
+use songbird::input::{Input, Metadata, Restartable, ytdl_search};
+use crate::guild::GUILD_REGISTRY;
+use crate::music::discord::{get_user_vc, join_guild_channel_from_msg};
 
 const MAX_QUEUE_HISTORY: usize = 3;
 
@@ -26,6 +23,7 @@ pub struct MusicManager {
     handler: Arc<Mutex<Call>>,
     next_track: usize,
     pub is_playing: bool,
+    pub guild_id: GuildId,
 }
 
 pub struct TrackEndEvent {
@@ -38,15 +36,15 @@ pub struct TrackEndEvent {
 impl EventHandler for TrackEndEvent {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         let event = ctx.to_core_event().map(|c| c.into());
-        let manager = MusicManager::get(self.handler.clone(), &self.id).await;
-        let mut manager_lock = manager.lock().await;
-        manager_lock.play_next(false).await;
+        let registry_lock = GUILD_REGISTRY.lock().await;
+        let guild_manager = registry_lock.get(&self.id)?.clone();
+        guild_manager.lock().await.music.as_mut().expect("No music manager?").play_next(false).await;
         event
     }
 }
 
 impl MusicManager {
-    pub async fn get_from_ctx(ctx: &Context, msg: &Message, id: &GuildId) -> Option<Arc<Mutex<MusicManager>>> {
+    pub async fn new(ctx: &Context, msg: &Message, guild_id: GuildId) -> Option<MusicManager> {
         let songbird = match songbird::get(ctx).await {
             Some(bird) => bird,
             None => {
@@ -55,39 +53,25 @@ impl MusicManager {
             }
         };
 
-        let handler = match songbird.get(*id) {
+        let mut handler = match songbird.get(guild_id) {
             Some(handler) => handler,
-            None => match join_guild_channel_from_msg(ctx, msg).await.0 {
-                Some(handler) => handler,
-                None => return None
-            }
+            None => join_guild_channel_from_msg(ctx, msg).await.0?
         };
 
-
-        Some(MusicManager::get(handler, id).await)
-    }
-
-    pub async fn get(handler: Arc<Mutex<Call>>, id: &GuildId) -> Arc<Mutex<MusicManager>> {
-        let mut lock = registry.lock().await;
-        let cache_manager = lock.get(id);
-        match cache_manager {
-            Some(manager) => manager.clone(),
-            None => {
-                let manager = Arc::new(Mutex::new(MusicManager {
-                    queue: Vec::new(),
-                    handler: handler.clone(),
-                    next_track: 0,
-                    is_playing: false,
-                }));
-                handler.clone().lock().await.add_global_event(Event::Track(TrackEvent::End),
-                TrackEndEvent {
-                    handler,
-                    id: id.clone()
-                });
-                lock.insert(id.clone(), manager.clone());
-                manager
-            }
-        }
+        let manager = Some(MusicManager {
+            queue: Vec::new(),
+            handler: handler.clone(),
+            next_track: 0,
+            is_playing: false,
+            guild_id
+        });
+        handler.clone().lock().await.add_global_event(
+            Event::Track(TrackEvent::End),
+            TrackEndEvent {
+                handler,
+                id: guild_id.clone()
+            });
+        manager
     }
 
     fn trim_queue(&mut self) {
@@ -125,24 +109,30 @@ impl MusicManager {
         );
     }
 
-    pub async fn play_next(&mut self, skip: bool) {
+    pub async fn play_next(&mut self, skip: bool) -> Option<Box<Metadata>> {
+        println!("Play next, {}, {}", skip, self.is_playing);
         let mut handler_lock = self.handler.lock().await;
 
         if skip && self.is_playing {
             handler_lock.stop();
-            return;
         }
 
         let track = match self.queue.get(self.next_track) {
             Some(track) => track.clone(),
             None => {
                 self.is_playing = false;
-                return;
+                return None;
             }
         };
 
         self.next_track += 1;
         self.is_playing = true;
-        handler_lock.play_only_source(track.into());
+        let input: Input = track.into();
+        let metadata = input.metadata.clone();
+
+
+        println!("Playing next track: {:?}", input.metadata.title);
+        handler_lock.play_only_source(input); Some(metadata)
     }
+
 }

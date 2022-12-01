@@ -1,3 +1,5 @@
+#![feature(is_some_and)]
+#![feature(async_closure)]
 //! Requires the "client", "standard_framework", and "voice" features be enabled in your
 //! Cargo.toml, like so:
 //!
@@ -7,8 +9,16 @@
 //! features = ["client", "standard_framework", "voice"]
 //! ```
 pub mod music;
+pub mod interaction;
+pub mod guild;
+pub mod member;
+pub mod json;
+pub mod arcs;
+pub mod troll;
+pub mod details;
 
 use std::env;
+use std::env::VarError;
 use std::sync::Arc;
 
 // This trait adds the `register_songbird` and `register_songbird_with` methods
@@ -33,9 +43,18 @@ use serenity::{
     prelude::GatewayIntents,
     Result as SerenityResult,
 };
-use songbird::input::Restartable;
+use serenity::model::channel::AttachmentType::Path;
+use serenity::model::channel::Reaction;
+use serenity::model::guild::Member;
+use serenity::model::id::GuildId;
+use songbird::input::{Metadata, Restartable};
 use tokio::sync::Mutex;
+use tracing::log::{Level, log};
+use crate::arcs::{CacheAndHttp, register_cache_and_http};
+use crate::guild::{GUILD_REGISTRY, GuildManager};
+use crate::interaction::{handle_message, InteractionManager};
 use crate::music::manager::MusicManager;
+
 
 struct Handler;
 
@@ -44,13 +63,21 @@ extern crate lazy_static;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
-        println!("{} is connected!", ready.user.name);
+    async fn message(&self, ctx: Context, msg: Message) {
+        println!("Message Received");
+        if !msg.is_own(&ctx) {
+            handle_message(ctx, msg).await;
+        }
+    }
+
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        register_cache_and_http(Arc::new(CacheAndHttp { cache: ctx.cache.clone(), http: ctx.http.clone(), shard: Arc::new(ctx.shard.clone()) })).await;
+        log!(Level::Info, "{} is connected!", ready.user.name);
     }
 }
 
 #[group]
-#[commands(deafen, join, play, undeafen, unmute, stop, skip)]
+#[commands(play, stop, skip, setup)]
 struct General;
 
 #[tokio::main]
@@ -58,11 +85,26 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // Configure the client with your Discord bot token in the environment.
-    let token = "MjAwNDgwMTg1MDQ3MzE4NTI4.V33luA.WRo_ytTrs7Xj6-3gsAPoWCLKzLs";
+
+    let mut token = String::new();
+    let mut prefix = "~";
+    cfg_if::cfg_if! {
+        if #[cfg(debug_assertions)] {
+            token = "MjAwOTkyNTc3MTc5MjIyMDE2.GNJAcw.DoztZ5WLN9QpOVRhDZIRy6Q5ogYFQCCsEKVSFA".to_string();
+            prefix = "e!";
+        } else {
+            token = match env::var("bot_token") {
+                Ok(token) => token,
+                Err(_) => {
+                    panic!("Unable to recover main api key");
+                }
+            };
+        }
+    };
 
     let framework = StandardFramework::new()
         .configure(|c| c
-            .prefix("~"))
+            .prefix(prefix))
         .group(&GENERAL_GROUP);
 
     let intents = GatewayIntents::all();
@@ -74,6 +116,7 @@ async fn main() {
         .await
         .expect("Err creating client");
 
+
     tokio::spawn(async move {
         let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));
     });
@@ -83,74 +126,57 @@ async fn main() {
 }
 
 #[command]
-#[only_in(guilds)]
-async fn deafen(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
+async fn setup(ctx: &Context, msg: &Message) -> CommandResult {
+    let acquire_lock = GUILD_REGISTRY.lock().await;
 
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
-
-    let handler_lock = match manager.get(guild_id) {
-        Some(handler) => handler,
-        None => {
-            check_msg(msg.reply(ctx, "Not in a voice channel").await);
-
-            return Ok(());
-        },
+    let guild_id = match msg.guild_id {
+        None => return Ok(()),
+        Some(guild_id) => guild_id
     };
+    msg.delete(&ctx).await.ok();
 
-    let mut handler = handler_lock.lock().await;
+    let manager = acquire_lock.get(&guild_id).clone();
 
-    if handler.is_deaf() {
-        check_msg(msg.channel_id.say(&ctx.http, "Already deafened").await);
-    } else {
-        if let Err(e) = handler.deafen(true).await {
-            check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
-        }
-
-        check_msg(msg.channel_id.say(&ctx.http, "Deafened").await);
-    }
-
-    Ok(())
-}
-
-#[command]
-#[only_in(guilds)]
-async fn join(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let channel_id = guild
-        .voice_states.get(&msg.author.id)
-        .and_then(|voice_state| voice_state.channel_id);
-
-    let connect_to = match channel_id {
-        Some(channel) => channel,
+    let manager = match manager {
+        Some(manager) => manager.clone(),
         None => {
-            check_msg(msg.reply(ctx, "Not in a voice channel").await);
-
-            return Ok(());
+            GuildManager::new(guild_id).register_already_locked(acquire_lock).await
         }
     };
-
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
-
-    let _handler = manager.join(guild_id, connect_to).await;
-
+    println!("Manager: {:?}", manager);
+    let mut manager_lock = manager.lock().await;
+    manager_lock.new_channel(ctx, msg.channel_id).await;
     Ok(())
 }
 
 #[command]
 async fn skip(ctx: &Context, msg: &Message) -> CommandResult {
+    println!("Skip called");
     let guild = msg.guild(&ctx.cache).unwrap();
     let guild_id = guild.id;
 
-    match MusicManager::get_from_ctx(ctx, msg, &guild_id).await {
-        Some(manager) => manager,
-        None => return Ok(())
-    }.lock().await.play_next(true).await;
+    let registry_lock = GUILD_REGISTRY.lock().await;
+    let guild_manager = match registry_lock.get(&guild_id) {
+        None => return Ok(()),
+        Some(guild_manager) => guild_manager,
+    };
+    let mut guild_lock = guild_manager.lock().await;
+
+    let metadata = match &mut guild_lock.music {
+        None => None,
+        Some(music) => Some(music.play_next(true).await)
+    };
+
+    match metadata {
+        None => {}
+        Some(metadata) => {
+            match &mut guild_lock.interaction {
+                None => {}
+                Some(interaction) => interaction.update_message(metadata).await
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -169,24 +195,25 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
         },
     };
 
-    let manager = match MusicManager::get_from_ctx(ctx, msg, &guild_id).await {
-        Some(manager) => manager,
-        None => {
-            println!("Could not retrieve Music Manager for guild: {}", guild.name);
-            return Ok(());
-        }
+    let registry_lock = GUILD_REGISTRY.lock().await;
+    let guild_manager = match registry_lock.get(&guild_id) {
+        None => return Ok(()),
+        Some(guild_manager) => guild_manager,
     };
-
-    let mut lock = manager.lock().await;
-    if search.starts_with("http") {
-        lock.queue(search).await;
-    } else {
-        lock.search_and_queue(search).await;
+    let mut guild_lock = guild_manager.lock().await;
+    if guild_lock.music.is_none() {
+        guild_lock.music = MusicManager::new(ctx, msg, guild_id).await
     }
 
-    println!("Lock: {:?}", lock);
-    if !lock.is_playing {
-        lock.play_next(false).await;
+    let music_manager = guild_lock.music.as_mut().unwrap();
+    if search.starts_with("http") {
+        music_manager.queue(search).await;
+    } else {
+        music_manager.search_and_queue(search).await;
+    }
+
+    if !music_manager.is_playing {
+        music_manager.play_next(false).await;
     }
 
     Ok(())
@@ -205,52 +232,6 @@ async fn stop(ctx: &Context, msg: &Message) -> CommandResult {
         handler.stop();
     } else {
         check_msg(msg.channel_id.say(&ctx.http, "Not in a voice channel to play in").await);
-    }
-
-    Ok(())
-}
-
-#[command]
-#[only_in(guilds)]
-async fn undeafen(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
-
-    if let Some(handler_lock) = manager.get(guild_id) {
-        let mut handler = handler_lock.lock().await;
-        if let Err(e) = handler.deafen(false).await {
-            check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
-        }
-
-        check_msg(msg.channel_id.say(&ctx.http, "Undeafened").await);
-    } else {
-        check_msg(msg.channel_id.say(&ctx.http, "Not in a voice channel to undeafen in").await);
-    }
-
-    Ok(())
-}
-
-#[command]
-#[only_in(guilds)]
-async fn unmute(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
-
-    if let Some(handler_lock) = manager.get(guild_id) {
-        let mut handler = handler_lock.lock().await;
-        if let Err(e) = handler.mute(false).await {
-            check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
-        }
-
-        check_msg(msg.channel_id.say(&ctx.http, "Unmuted").await);
-    } else {
-        check_msg(msg.channel_id.say(&ctx.http, "Not in a voice channel to unmute in").await);
     }
 
     Ok(())
