@@ -11,6 +11,7 @@ use serenity::model::guild::Guild;
 use serenity::model::id::GuildId;
 use songbird::{Call, Event, EventContext, EventHandler, Songbird, TrackEvent, ytdl};
 use songbird::input::{Input, Metadata, Restartable, ytdl_search};
+use tracing::error;
 use crate::guild::GUILD_REGISTRY;
 use crate::music::discord::{get_user_vc, join_guild_channel_from_msg};
 use crate::music::state::{MusicState, QueueAction, QueueItem};
@@ -56,7 +57,7 @@ impl MusicManager {
         let songbird = match songbird::get(ctx).await {
             Some(bird) => bird,
             None => {
-                println!("Could not retrieve songbird instance");
+                error!("Could not retrieve songbird instance");
                 return None;
             }
         };
@@ -98,7 +99,7 @@ impl MusicManager {
             match Restartable::ytdl_search(name, true).await {
                 Ok(source) => source,
                 Err(err) => {
-                    eprintln!("{:?}", err);
+                    error!("Error creating music source: {}", err);
                     return;
                 }
             }
@@ -112,7 +113,7 @@ impl MusicManager {
             match Restartable::ytdl(url, true).await {
                 Ok(source) => source,
                 Err(err) => {
-                    eprintln!("{:?}", err);
+                    error!("Error creating music source: {}", err);
                     return;
                 }
             }

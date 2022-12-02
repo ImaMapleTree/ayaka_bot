@@ -95,7 +95,6 @@ impl InteractionManager {
     }
 
     pub async fn attach_message(mut self, context: Option<&Context>) -> Self {
-        println!("Attaching message");
         let cache_and_http = get_cache_and_http().await;
         let messages = match self.channel_id.messages(&cache_and_http.http, |ret| ret.limit(50)).await {
             Ok(messages) => messages,
@@ -119,7 +118,6 @@ impl InteractionManager {
 
         self.message = Some(message.clone());
 
-        println!("Got message");
         let guild_id = match match self.channel_id.to_channel_cached(&cache_and_http.cache) {
             None => self.channel_id.to_channel(&cache_and_http.http).await.ok(),
             Some(channel) => Some(channel)

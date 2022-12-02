@@ -51,7 +51,6 @@ pub async fn load_guilds_to_cache() -> Result<(), String> {
 
         let mut registry = GUILD_REGISTRY.lock().await;
         for guild_json in cfg.guilds {
-            println!("{:?}", guild_json);
             let guild_manager = GuildManager::from_json(guild_json).await;
             registry.insert(guild_manager.id, Arc::new(Mutex::new(guild_manager)));
         }

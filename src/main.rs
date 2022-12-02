@@ -67,7 +67,6 @@ extern crate lazy_static;
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        println!("Message Received");
         if !msg.is_own(&ctx) {
             handle_message(ctx, msg).await;
         }
@@ -91,7 +90,7 @@ impl EventHandler for Handler {
 }
 
 #[group]
-#[commands(play, stop, skip, setup)]
+#[commands(setup)]
 struct General;
 
 #[tokio::main]
@@ -157,97 +156,8 @@ async fn setup(ctx: &Context, msg: &Message) -> CommandResult {
             GuildManager::new(guild_id).register_already_locked(acquire_lock).await
         }
     };
-    println!("Manager: {:?}", manager);
     let mut manager_lock = manager.lock().await;
     manager_lock.new_channel(ctx, msg.channel_id).await;
-    Ok(())
-}
-
-#[command]
-async fn skip(ctx: &Context, msg: &Message) -> CommandResult {
-    println!("Skip called");
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let registry_lock = GUILD_REGISTRY.lock().await;
-    let guild_manager = match registry_lock.get(&guild_id) {
-        None => return Ok(()),
-        Some(guild_manager) => guild_manager,
-    };
-    let mut guild_lock = guild_manager.lock().await;
-
-    let metadata = match &mut guild_lock.music {
-        None => None,
-        Some(music) => Some(music.change_track(QueueAction::HardNext).await)
-    };
-
-    match metadata {
-        None => {}
-        Some(metadata) => {
-            match &mut guild_lock.interaction {
-                None => {}
-                Some(interaction) => interaction.update_message(metadata, true).await
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[command]
-#[only_in(guilds)]
-async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let search = match args.single::<String>() {
-        Ok(url) => url,
-        Err(_) => {
-            check_msg(msg.channel_id.say(&ctx.http, "Must provide a URL to a video or audio").await);
-
-            return Ok(());
-        },
-    };
-
-    let registry_lock = GUILD_REGISTRY.lock().await;
-    let guild_manager = match registry_lock.get(&guild_id) {
-        None => return Ok(()),
-        Some(guild_manager) => guild_manager,
-    };
-    let mut guild_lock = guild_manager.lock().await;
-    if guild_lock.music.is_none() {
-        guild_lock.music = MusicManager::new(ctx, msg, guild_id).await
-    }
-
-    let music_manager = guild_lock.music.as_mut().unwrap();
-    if search.starts_with("http") {
-        music_manager.queue(search).await;
-    } else {
-        music_manager.search_and_queue(search).await;
-    }
-
-    if !music_manager.is_playing {
-        music_manager.change_track(QueueAction::SoftNext).await;
-    }
-
-    Ok(())
-}
-
-#[command]
-async fn stop(ctx: &Context, msg: &Message) -> CommandResult {
-    let guild = msg.guild(&ctx.cache).unwrap();
-    let guild_id = guild.id;
-
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
-
-    if let Some(handler_lock) = manager.get(guild_id) {
-        let mut handler = handler_lock.lock().await;
-        handler.stop();
-    } else {
-        check_msg(msg.channel_id.say(&ctx.http, "Not in a voice channel to play in").await);
-    }
-
     Ok(())
 }
 

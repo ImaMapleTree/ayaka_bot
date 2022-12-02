@@ -12,7 +12,6 @@ use tokio::sync::Mutex;
 
 pub async fn join_channel(songbird: Arc<Songbird>, channel: GuildChannel) -> Arc<Mutex<Call>> {
     let result = songbird.join(channel.guild_id, channel.id).await;
-    println!("Discord Channel Result: {:?}", result);
     result.0
 }
 

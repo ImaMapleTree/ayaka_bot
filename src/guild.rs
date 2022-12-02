@@ -39,18 +39,13 @@ impl GuildManager {
     }
 
     pub async fn new_channel(&mut self, ctx: &Context, id: ChannelId) {
-        println!("Creating new channel");
         self.interaction = Some(InteractionManager::new(Some(ctx), id).await);
-
-
     }
 
     pub async fn register(self) -> Arc<Mutex<GuildManager>> {
         let id = self.id;
         let arc = Arc::new(Mutex::new(self));
-        println!("Guild registry?");
         GUILD_REGISTRY.lock().await.insert(id, arc.clone());
-        println!("Guild registry added?");
         arc
     }
 
