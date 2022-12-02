@@ -1,8 +1,9 @@
 use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::sync::Arc;
+use rand::Rng;
 use serenity::async_trait;
 use serenity::client::Context;
 use serenity::model::channel::Message;
@@ -12,8 +13,9 @@ use songbird::{Call, Event, EventContext, EventHandler, Songbird, TrackEvent, yt
 use songbird::input::{Input, Metadata, Restartable, ytdl_search};
 use crate::guild::GUILD_REGISTRY;
 use crate::music::discord::{get_user_vc, join_guild_channel_from_msg};
+use crate::music::state::{MusicState, QueueAction, QueueItem};
 
-const MAX_QUEUE_HISTORY: usize = 3;
+const MAX_QUEUE_HISTORY: usize = 20;
 
 unsafe impl Sync for MusicManager {}
 
@@ -24,6 +26,8 @@ pub struct MusicManager {
     next_track: usize,
     pub is_playing: bool,
     pub guild_id: GuildId,
+    pub looping: bool,
+    pub shuffling: bool
 }
 
 pub struct TrackEndEvent {
@@ -38,7 +42,11 @@ impl EventHandler for TrackEndEvent {
         let event = ctx.to_core_event().map(|c| c.into());
         let registry_lock = GUILD_REGISTRY.lock().await;
         let guild_manager = registry_lock.get(&self.id)?.clone();
-        guild_manager.lock().await.music.as_mut().expect("No music manager?").play_next(false).await;
+        let mut guild_lock = guild_manager.lock().await;
+        let metadata = guild_lock.music.as_mut().expect("No music manager?").change_track(QueueAction::SoftNext).await;
+        if let Some(interaction) = &mut guild_lock.interaction {
+            interaction.update_message(metadata, true).await;
+        }
         event
     }
 }
@@ -63,7 +71,9 @@ impl MusicManager {
             handler: handler.clone(),
             next_track: 0,
             is_playing: false,
-            guild_id
+            guild_id,
+            looping: false,
+            shuffling: false
         });
         handler.clone().lock().await.add_global_event(
             Event::Track(TrackEvent::End),
@@ -74,7 +84,7 @@ impl MusicManager {
         manager
     }
 
-    fn trim_queue(&mut self) {
+    fn neaten_queue(&mut self) {
         if self.next_track > MAX_QUEUE_HISTORY {
             self.queue.remove(0);
             self.next_track = self.next_track.saturating_sub(1);
@@ -82,7 +92,7 @@ impl MusicManager {
     }
 
     pub async fn search_and_queue(&mut self, name: String) {
-        self.trim_queue();
+        self.neaten_queue();
 
         self.queue.push(
             match Restartable::ytdl_search(name, true).await {
@@ -96,7 +106,7 @@ impl MusicManager {
     }
 
     pub async fn queue(&mut self, url: String) {
-        self.trim_queue();
+        self.neaten_queue();
 
         self.queue.push(
             match Restartable::ytdl(url, true).await {
@@ -109,19 +119,65 @@ impl MusicManager {
         );
     }
 
-    pub async fn play_next(&mut self, skip: bool) -> Option<Box<Metadata>> {
-        println!("Play next, {}, {}", skip, self.is_playing);
+    pub fn cut_line(&mut self, target: usize) {
+        let item = self.queue.remove(target);
+        self.queue.insert(self.next_track, item);
+    }
+
+    pub fn toggle_loop(&mut self) -> MusicState {
+        self.looping = !self.looping;
+        if self.looping {
+            self.queue = self.queue.split_off(self.next_track);
+            self.next_track = 0;
+        }
+        self.get_state(None)
+    }
+
+    pub fn toggle_shuffle(&mut self) -> MusicState {
+        self.shuffling = !self.shuffling;
+        self.get_state(None)
+    }
+
+    pub async fn stop_music(&mut self) -> MusicState {
+        self.queue.clear();
+        self.change_track(QueueAction::HardNext).await
+    }
+
+    pub async fn  change_track(&mut self, action: QueueAction) -> MusicState {
         let mut handler_lock = self.handler.lock().await;
 
-        if skip && self.is_playing {
-            handler_lock.stop();
+        match action {
+            QueueAction::HardNext | QueueAction::SelectedNext => {
+                if self.is_playing { handler_lock.stop(); }
+            }
+            QueueAction::Previous => { self.next_track = self.next_track.saturating_sub(2); }
+            _ => {}
+        }
+
+        if self.shuffling && action != QueueAction::SelectedNext {
+            if !self.queue.is_empty() {
+                let mut next_track = rand::thread_rng().gen_range(0..self.queue.len());
+                while next_track == self.next_track.saturating_sub(1) && self.next_track.saturating_sub(1) > 0 {
+                    next_track = rand::thread_rng().gen_range(0..self.queue.len());
+                }
+                self.next_track = next_track;
+            }
+        }
+
+        if self.next_track >= self.queue.len() && self.looping {
+            self.next_track = 0
         }
 
         let track = match self.queue.get(self.next_track) {
             Some(track) => track.clone(),
             None => {
                 self.is_playing = false;
-                return None;
+                return MusicState {
+                    metadata: None,
+                    queue_names: vec![],
+                    looping: self.looping,
+                    shuffling: self.shuffling
+                }
             }
         };
 
@@ -131,8 +187,32 @@ impl MusicManager {
         let metadata = input.metadata.clone();
 
 
-        println!("Playing next track: {:?}", input.metadata.title);
-        handler_lock.play_only_source(input); Some(metadata)
+        handler_lock.play_only_source(input);
+        self.get_state(Some(metadata))
     }
 
+    pub fn get_items_in_queue(&self) -> Vec<QueueItem> {
+        let skip_amount = if self.shuffling { 0 } else { self.next_track };
+
+
+        self.queue.iter()
+            .enumerate()
+            .skip(skip_amount)
+            .map(|(i, t)| {
+                let input: Input = t.clone().into();
+                QueueItem {
+                    title: input.metadata.title.unwrap_or(String::from("")),
+                    index: i
+                }
+            }).collect::<Vec<QueueItem>>()
+    }
+
+    pub fn get_state(&self, metadata: Option<Box<Metadata>>) -> MusicState {
+        MusicState {
+            metadata,
+            queue_names: self.get_items_in_queue(),
+            looping: self.looping,
+            shuffling: self.shuffling
+        }
+    }
 }

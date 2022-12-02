@@ -61,19 +61,30 @@ impl GuildManager {
         arc
     }
 
-
     pub async fn init_async(&mut self) {
         self.interaction = match &self.interaction {
             None => None,
             Some(manager) => Some(InteractionManager::new(None, manager.channel_id).await)
         };
     }
-}
 
-impl Into<GuildJson> for GuildManager {
-    fn into(self) -> GuildJson {
+    pub async fn from_json(json: GuildJson) -> Self {
+        let interaction = if !json.channel_setup || json.music_channel.is_none() { None }
+        else {
+            Some(InteractionManager::new(None, ChannelId(json.music_channel.unwrap())).await)
+        };
+        GuildManager {
+            music: None,
+            interaction,
+            member: MemberManager::default(),
+            id: GuildId(json.guild_id)
+        }
+    }
+
+    pub fn to_json_struct(&self) -> GuildJson {
         GuildJson {
-            music_channel: self.interaction.map(|r| r.channel_id.0),
+            music_channel: self.interaction.as_ref().map(|r| r.channel_id.0),
+            channel_setup: self.interaction.as_ref().is_some_and(|i| i.message.is_some()),
             guild_id: self.id.0
         }
     }

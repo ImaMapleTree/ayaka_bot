@@ -49,11 +49,14 @@ use serenity::model::guild::Member;
 use serenity::model::id::GuildId;
 use songbird::input::{Metadata, Restartable};
 use tokio::sync::Mutex;
+use tokio_schedule::Job;
 use tracing::log::{Level, log};
 use crate::arcs::{CacheAndHttp, register_cache_and_http};
 use crate::guild::{GUILD_REGISTRY, GuildManager};
 use crate::interaction::{handle_message, InteractionManager};
+use crate::json::{load_guilds_to_cache, save_guilds_to_disk};
 use crate::music::manager::MusicManager;
+use crate::music::state::QueueAction;
 
 
 struct Handler;
@@ -72,7 +75,18 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         register_cache_and_http(Arc::new(CacheAndHttp { cache: ctx.cache.clone(), http: ctx.http.clone(), shard: Arc::new(ctx.shard.clone()) })).await;
-        log!(Level::Info, "{} is connected!", ready.user.name);
+        log!(Level::Info, "{} is connected! Beginning disk load", ready.user.name);
+
+        match load_guilds_to_cache().await {
+            Ok(_) => log!(Level::Info, "Successfully loaded guilds from disk"),
+            Err(err) => {
+                panic!("Unable to load guilds from disk due to: {} Aborting.", err)
+            }
+        }
+
+
+        let future = tokio_schedule::every(5).seconds().perform(|| async { save_guilds_to_disk().await});
+        tokio::spawn(future);
     }
 }
 
@@ -121,7 +135,7 @@ async fn main() {
         let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));
     });
 
-    tokio::signal::ctrl_c().await;
+    tokio::signal::ctrl_c().await.ok();
     println!("Received Ctrl-C, shutting down.");
 }
 
@@ -164,7 +178,7 @@ async fn skip(ctx: &Context, msg: &Message) -> CommandResult {
 
     let metadata = match &mut guild_lock.music {
         None => None,
-        Some(music) => Some(music.play_next(true).await)
+        Some(music) => Some(music.change_track(QueueAction::HardNext).await)
     };
 
     match metadata {
@@ -172,7 +186,7 @@ async fn skip(ctx: &Context, msg: &Message) -> CommandResult {
         Some(metadata) => {
             match &mut guild_lock.interaction {
                 None => {}
-                Some(interaction) => interaction.update_message(metadata).await
+                Some(interaction) => interaction.update_message(metadata, true).await
             }
         }
     }
@@ -213,7 +227,7 @@ async fn play(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
     }
 
     if !music_manager.is_playing {
-        music_manager.play_next(false).await;
+        music_manager.change_track(QueueAction::SoftNext).await;
     }
 
     Ok(())
