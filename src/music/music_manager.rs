@@ -1,16 +1,17 @@
 use tokio::sync::Mutex;
-use std::collections::HashMap;
-use std::future::Future;
-use std::io::{Read, Seek};
+
+
+
 use std::sync::Arc;
 use rand::Rng;
 use serenity::async_trait;
 use serenity::client::Context;
-use serenity::model::channel::Message;
+use serenity::model::channel::{Message};
 use serenity::model::guild::Guild;
-use serenity::model::id::GuildId;
-use songbird::{Call, Event, EventContext, EventHandler, Songbird, TrackEvent, ytdl};
-use songbird::input::{Input, Metadata, Restartable, ytdl_search};
+
+use serenity::model::id::{GuildId};
+use songbird::{Call, Event, EventContext, EventHandler, TrackEvent};
+use songbird::input::{Input, Metadata, Restartable};
 use tracing::error;
 use crate::guild::GUILD_REGISTRY;
 use crate::music::discord::{get_user_vc, join_guild_channel_from_msg};
@@ -23,7 +24,7 @@ unsafe impl Sync for MusicManager {}
 #[derive(Debug)]
 pub struct MusicManager {
     queue: Vec<Restartable>,
-    handler: Arc<Mutex<Call>>,
+    handler: Option<Arc<Mutex<Call>>>,
     next_track: usize,
     pub is_playing: bool,
     pub guild_id: GuildId,
@@ -32,7 +33,6 @@ pub struct MusicManager {
 }
 
 pub struct TrackEndEvent {
-    handler: Arc<Mutex<Call>>,
     id: GuildId
 }
 
@@ -44,45 +44,56 @@ impl EventHandler for TrackEndEvent {
         let registry_lock = GUILD_REGISTRY.lock().await;
         let guild_manager = registry_lock.get(&self.id)?.clone();
         let mut guild_lock = guild_manager.lock().await;
-        let metadata = guild_lock.music.as_mut().expect("No music manager?").change_track(QueueAction::SoftNext).await;
+        let metadata = guild_lock.music.change_track(QueueAction::SoftNext).await;
         if let Some(interaction) = &mut guild_lock.interaction {
-            interaction.update_message(metadata, true).await;
+            interaction.update_message(metadata, QueueAction::HardNext).await;
         }
         event
     }
 }
 
 impl MusicManager {
-    pub async fn new(ctx: &Context, msg: &Message, guild_id: GuildId) -> Option<MusicManager> {
-        let songbird = match songbird::get(ctx).await {
-            Some(bird) => bird,
-            None => {
-                error!("Could not retrieve songbird instance");
-                return None;
-            }
-        };
-
-        let mut handler = match songbird.get(guild_id) {
-            Some(handler) => handler,
-            None => join_guild_channel_from_msg(ctx, msg).await.0?
-        };
-
-        let manager = Some(MusicManager {
-            queue: Vec::new(),
-            handler: handler.clone(),
+    pub fn new_no_async(guild_id: GuildId) -> MusicManager {
+        MusicManager {
+            queue: vec![],
+            handler: None,
             next_track: 0,
             is_playing: false,
             guild_id,
             looping: false,
             shuffling: false
-        });
-        handler.clone().lock().await.add_global_event(
-            Event::Track(TrackEvent::End),
-            TrackEndEvent {
-                handler,
-                id: guild_id.clone()
-            });
-        manager
+        }
+    }
+
+    pub async fn try_join(&mut self, context: &Context, message: &Message, guild: Option<Guild>) {
+        let mut new_handler = false;
+        let guild = match guild {
+            None => return,
+            Some(guild) => guild
+        };
+        let guild_id = guild.id;
+
+        self.handler = match &self.handler {
+            Some(handler) => {
+                let mut opt_handler = Some(handler.clone());
+                let lock = handler.lock().await;
+                if !lock.current_channel().is_some_and(|c| get_user_vc(guild, message.author.clone()).is_some_and(|vc| vc.0 == c.0)) {
+                    new_handler = true;
+                    opt_handler = join_guild_channel_from_msg(context, message).await.0
+                } opt_handler
+            }
+            None => {
+                new_handler = true;
+                join_guild_channel_from_msg(context, message).await.0
+            }
+        };
+        if new_handler && let Some(handler) = &self.handler {
+            handler.clone().lock().await.add_global_event(
+                Event::Track(TrackEvent::End),
+                TrackEndEvent {
+                    id: guild_id
+                });
+        }
     }
 
     fn neaten_queue(&mut self) {
@@ -118,6 +129,8 @@ impl MusicManager {
                 }
             }
         );
+
+        println!("Queue: {:?}", self.queue);
     }
 
     pub fn cut_line(&mut self, target: usize) {
@@ -128,7 +141,7 @@ impl MusicManager {
     pub fn toggle_loop(&mut self) -> MusicState {
         self.looping = !self.looping;
         if self.looping {
-            self.queue = self.queue.split_off(self.next_track);
+            self.queue = self.queue.split_off(self.next_track.saturating_sub(1));
             self.next_track = 0;
         }
         self.get_state(None)
@@ -144,8 +157,12 @@ impl MusicManager {
         self.change_track(QueueAction::HardNext).await
     }
 
-    pub async fn  change_track(&mut self, action: QueueAction) -> MusicState {
-        let mut handler_lock = self.handler.lock().await;
+    pub async fn change_track(&mut self, action: QueueAction) -> MusicState {
+        let handle = match &self.handler {
+            None => return self.get_state(None),
+            Some(handle) => handle.clone()
+        };
+        let mut handler_lock = handle.lock().await;
 
         match action {
             QueueAction::HardNext | QueueAction::SelectedNext => {
@@ -155,14 +172,12 @@ impl MusicManager {
             _ => {}
         }
 
-        if self.shuffling && action != QueueAction::SelectedNext {
-            if !self.queue.is_empty() {
-                let mut next_track = rand::thread_rng().gen_range(0..self.queue.len());
-                while next_track == self.next_track.saturating_sub(1) && self.next_track.saturating_sub(1) > 0 {
-                    next_track = rand::thread_rng().gen_range(0..self.queue.len());
-                }
-                self.next_track = next_track;
+        if self.shuffling && action != QueueAction::SelectedNext && !self.queue.is_empty() {
+            let mut next_track = rand::thread_rng().gen_range(0..self.queue.len());
+            while next_track == self.next_track.saturating_sub(1) && self.next_track.saturating_sub(1) > 0 {
+                next_track = rand::thread_rng().gen_range(0..self.queue.len());
             }
+            self.next_track = next_track;
         }
 
         if self.next_track >= self.queue.len() && self.looping {
@@ -200,9 +215,8 @@ impl MusicManager {
             .enumerate()
             .skip(skip_amount)
             .map(|(i, t)| {
-                let input: Input = t.clone().into();
                 QueueItem {
-                    title: input.metadata.title.unwrap_or(String::from("")),
+                    title: t.get_metadata().and_then(|metadata| metadata.title).unwrap_or_else(|| String::from("")),
                     index: i
                 }
             }).collect::<Vec<QueueItem>>()

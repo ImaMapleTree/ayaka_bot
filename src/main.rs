@@ -1,5 +1,6 @@
 #![feature(is_some_and)]
 #![feature(async_closure)]
+#![feature(let_chains)]
 //! Requires the "client", "standard_framework", and "voice" features be enabled in your
 //! Cargo.toml, like so:
 //!
@@ -16,47 +17,35 @@ pub mod json;
 pub mod arcs;
 pub mod troll;
 pub mod details;
+pub mod commands;
 
-use std::env;
-use std::env::VarError;
+
 use std::sync::Arc;
 
 // This trait adds the `register_songbird` and `register_songbird_with` methods
 // to the client builder below, making it easy to install this voice client.
-// The voice client can be retrieved in any command using `songbird::get(ctx).await`.
+// The voice client can be retrieved in any commands using `songbird::get(ctx).await`.
 use songbird::SerenityInit;
 
-// Import the `Context` to handle commands.
-use serenity::client::Context;
-
-use serenity::{
-    async_trait,
-    client::{Client, EventHandler},
-    framework::{
-        StandardFramework,
-        standard::{
-            Args, CommandResult,
-            macros::{command, group},
-        },
+use serenity::{async_trait, client::{Client, EventHandler, Context}, Error, framework::{
+    StandardFramework,
+    standard::{
+        CommandResult,
+        macros::{command, group},
     },
-    model::{channel::Message, gateway::Ready},
-    prelude::GatewayIntents,
-    Result as SerenityResult,
+}, model::{channel::Message, gateway::Ready, application::interaction::Interaction}, prelude::GatewayIntents};
+
+use crate::{
+    arcs::{CacheAndHttp, register_cache_and_http},
+    interaction::{handle_message},
+    json::{load_guilds_to_cache, save_guilds_to_disk},
+    commands::{
+        setup,
+    }
 };
-use serenity::model::channel::AttachmentType::Path;
-use serenity::model::channel::Reaction;
-use serenity::model::guild::Member;
-use serenity::model::id::GuildId;
-use songbird::input::{Metadata, Restartable};
-use tokio::sync::Mutex;
+
 use tokio_schedule::Job;
-use tracing::log::{Level, log};
-use crate::arcs::{CacheAndHttp, register_cache_and_http};
-use crate::guild::{GUILD_REGISTRY, GuildManager};
-use crate::interaction::{handle_message, InteractionManager};
-use crate::json::{load_guilds_to_cache, save_guilds_to_disk};
-use crate::music::manager::MusicManager;
-use crate::music::state::QueueAction;
+use tracing::log::{error, Level, log};
 
 
 struct Handler;
@@ -83,14 +72,26 @@ impl EventHandler for Handler {
             }
         }
 
+        match commands::register_commands(&ctx.http).await {
+            Ok(_) => log!(Level::Info, "Commands successfully registered"),
+            Err(err) => error!("Error registering commands {}", err)
+        }
+
 
         let future = tokio_schedule::every(5).seconds().perform(|| async { save_guilds_to_disk().await});
         tokio::spawn(future);
     }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::ApplicationCommand(command) = interaction {
+            match command.data.name.as_str() {
+                setup::SETUP_CMD_NAME => setup::execute(ctx, command).await,
+                _ => {}
+            };
+        }
+    }
 }
 
-#[group]
-#[commands(setup)]
 struct General;
 
 #[tokio::main]
@@ -117,8 +118,9 @@ async fn main() {
 
     let framework = StandardFramework::new()
         .configure(|c| c
-            .prefix(prefix))
-        .group(&GENERAL_GROUP);
+            .prefix(prefix)
+            .allow_dm(false));
+
 
     let intents = GatewayIntents::all();
 
@@ -130,40 +132,11 @@ async fn main() {
         .expect("Err creating client");
 
 
+
     tokio::spawn(async move {
         let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));
     });
 
     tokio::signal::ctrl_c().await.ok();
     println!("Received Ctrl-C, shutting down.");
-}
-
-#[command]
-async fn setup(ctx: &Context, msg: &Message) -> CommandResult {
-    let acquire_lock = GUILD_REGISTRY.lock().await;
-
-    let guild_id = match msg.guild_id {
-        None => return Ok(()),
-        Some(guild_id) => guild_id
-    };
-    msg.delete(&ctx).await.ok();
-
-    let manager = acquire_lock.get(&guild_id).clone();
-
-    let manager = match manager {
-        Some(manager) => manager.clone(),
-        None => {
-            GuildManager::new(guild_id).register_already_locked(acquire_lock).await
-        }
-    };
-    let mut manager_lock = manager.lock().await;
-    manager_lock.new_channel(ctx, msg.channel_id).await;
-    Ok(())
-}
-
-/// Checks that a message successfully sent; if not, then logs why to stdout.
-fn check_msg(result: SerenityResult<Message>) {
-    if let Err(why) = result {
-        println!("Error sending message: {:?}", why);
-    }
 }

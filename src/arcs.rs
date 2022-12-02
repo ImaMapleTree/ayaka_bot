@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use serenity::Client;
+
 use serenity::client::bridge::gateway::{ShardMessenger};
 use serenity::client::Cache;
 use serenity::http::{CacheHttp, Http};
@@ -46,6 +46,6 @@ pub async fn register_cache_and_http(cache_http: Arc<CacheAndHttp>) {
 }
 
 pub async fn get_cache_and_http() -> Arc<CacheAndHttp> {
-    let mut acquire_lock = CACHE_HTTP_HOLDER.lock().await;
+    let acquire_lock = CACHE_HTTP_HOLDER.lock().await;
     acquire_lock.last().expect("Cache and http not registered").clone()
 }

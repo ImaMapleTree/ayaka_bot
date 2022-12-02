@@ -20,6 +20,7 @@ pub enum QueueAction {
     SoftNext,
     Previous,
     SelectedNext,
+    StateChange,
 }
 
 impl From<&str> for QueueAction {

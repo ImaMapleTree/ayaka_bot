@@ -1,15 +1,14 @@
 use tokio::sync::{Mutex, MutexGuard};
 use std::sync::Arc;
 use std::collections::HashMap;
-use serenity::async_trait;
-use serenity::client::{Context, RawEventHandler};
-use serenity::model::event::Event;
-use serenity::model::guild::Member;
+
+use serenity::client::{Context};
+
+
 use serenity::model::id::{ChannelId, GuildId};
-use serenity::prelude::EventHandler;
 use crate::json::GuildJson;
 use crate::member::MemberManager;
-use crate::music::manager::MusicManager;
+use crate::music::music_manager::MusicManager;
 use crate::interaction::InteractionManager;
 
 type GuildRegistry<'a> = MutexGuard<'a, HashMap<GuildId, Arc<Mutex<GuildManager>>>>;
@@ -20,7 +19,7 @@ lazy_static! {
 
 #[derive(Debug)]
 pub struct GuildManager {
-    pub music: Option<MusicManager>,
+    pub music: MusicManager,
     pub interaction: Option<InteractionManager>,
     pub member: MemberManager,
     pub id: GuildId
@@ -28,10 +27,10 @@ pub struct GuildManager {
 
 impl GuildManager {
     /// Constraint: Should only be called on guild join
-    /// Or with specific command
+    /// Or with specific commands
     pub fn new(id: GuildId) -> GuildManager {
         GuildManager {
-            music: None,
+            music: MusicManager::new_no_async(id),
             interaction: None,
             member: MemberManager::default(),
             id
@@ -68,11 +67,12 @@ impl GuildManager {
         else {
             Some(InteractionManager::new(None, ChannelId(json.music_channel.unwrap())).await)
         };
+        let guild_id = GuildId(json.guild_id);
         GuildManager {
-            music: None,
+            music: MusicManager::new_no_async(guild_id),
             interaction,
             member: MemberManager::default(),
-            id: GuildId(json.guild_id)
+            id: guild_id
         }
     }
 
@@ -81,17 +81,6 @@ impl GuildManager {
             music_channel: self.interaction.as_ref().map(|r| r.channel_id.0),
             channel_setup: self.interaction.as_ref().is_some_and(|i| i.message.is_some()),
             guild_id: self.id.0
-        }
-    }
-}
-
-impl From<GuildJson> for GuildManager {
-    fn from(value: GuildJson) -> Self {
-        GuildManager {
-            music: None,
-            interaction: value.music_channel.map(|v| InteractionManager::new_no_async( ChannelId(v))),
-            member: MemberManager::default(),
-            id: GuildId(value.guild_id)
         }
     }
 }

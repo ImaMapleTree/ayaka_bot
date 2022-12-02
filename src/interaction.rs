@@ -1,24 +1,26 @@
+pub mod menu;
+pub mod menu_defaults;
+
 use std::str::FromStr;
 use std::sync::Arc;
-use serenity::async_trait;
-use serenity::builder::{CreateComponents, CreateEmbed, CreateSelectMenuOption, CreateSelectMenuOptions};
-use serenity::cache::Cache;
-use serenity::client::{Context, EventHandler};
+
+
+
+use serenity::client::{Context};
 use serenity::http::Http;
-use serenity::model::application::component::ButtonStyle;
-use serenity::model::application::interaction::message_component::MessageComponentInteraction;
-use serenity::model::channel::{Channel, EmbedImage, Message, Reaction, ReactionType};
-use serenity::model::guild::Options;
+
+
+use serenity::model::channel::{Message};
+
 use serenity::model::id::{ChannelId, GuildId};
-use serenity::utils::Color;
-use songbird::input::Metadata;
+
 use tracing::error;
 use tracing::log::{Level, log};
 use crate::arcs::{get_cache_and_http};
 use crate::guild::GUILD_REGISTRY;
-use crate::music::manager::MusicManager;
-use crate::music::state::{MusicState, QueueAction, QueueItem};
-use crate::troll;
+use crate::interaction::menu::create_interaction;
+use crate::music::state::{MusicState, QueueAction};
+
 
 pub struct InteractionHandler;
 
@@ -37,37 +39,20 @@ impl InteractionHandler {
             let mut manager_lock = manager.lock().await;
             let id = interaction.data.custom_id.as_str();
             let music = &mut manager_lock.music;
-            let state = match id {
-                "next" | "prev" => match music {
-                    Some(music) => Some(music.change_track(QueueAction::from(id)).await),
-                    None => None
-                },
-                "stop" => match music {
-                    Some(music) => Some(music.stop_music().await),
-                    None => None
-                },
-                "shuffle" => match music {
-                    None => None,
-                    Some(music) => Some(music.toggle_shuffle())
+            let (state, action) = match id {
+                "next" | "prev" => (music.change_track(QueueAction::from(id)).await, QueueAction::from(id)),
+                "stop" => (music.stop_music().await, QueueAction::HardNext),
+                "shuffle" => (music.toggle_shuffle(), QueueAction::StateChange),
+                "loop" => (music.toggle_loop(), QueueAction::StateChange),
+                "queue_select" => {
+                    let index = usize::from_str(interaction.data.values.last().unwrap()).unwrap();
+                    music.cut_line(index);
+                    (music.change_track(QueueAction::SelectedNext).await, QueueAction::SelectedNext)
                 }
-                "loop" => match music {
-                    None => None,
-                    Some(music) => Some(music.toggle_loop())
-                }
-                "queue_select" => match music {
-                    None => None,
-                    Some(music) => {
-                        let index = usize::from_str(interaction.data.values.last().unwrap()).unwrap();
-                        music.cut_line(index);
-                        Some(music.change_track(QueueAction::SelectedNext).await)
-                    }
-                }
-                _ => None
+                _ => { (music.get_state(None), QueueAction::StateChange) }
             };
             if let Some(interaction) = &mut manager_lock.interaction {
-                if let Some(state) = state {
-                    interaction.update_message(state, true).await;
-                }
+                interaction.update_message(state, action).await;
             }
 
             interaction.defer(&chs.http).await.ok();
@@ -104,7 +89,7 @@ impl InteractionManager {
         if messages.iter().filter(|m| !m.is_own(&cache_and_http.cache)).count() > 0 {
             match context {
                 None => {}
-                Some(ctx) => { self.channel_id.say(&ctx, "❌ **Designated music channel must first be empty** ❌").await; return self }
+                Some(ctx) => { self.channel_id.say(&ctx, "❌ **Designated music channel must first be empty** ❌").await.ok(); return self }
             }
         }
         for message in messages {
@@ -129,51 +114,27 @@ impl InteractionManager {
         self
     }
 
-    pub async fn update_message(&mut self, music_state: MusicState, next_track: bool) {
-        let metadata = music_state.metadata.unwrap_or_default();
+    pub async fn update_message(&mut self, music_state: MusicState, action: QueueAction) {
         let cache = get_cache_and_http().await;
 
-
-        let mut new_message = None;
         if let Some(message) = &mut self.message {
-            new_message = match self.channel_id.message(&cache.http, message.id).await {
-                Err(err) => return,
-                Ok(message) => Some(message)
+            let mut new_message = match self.channel_id.message(&cache.http, message.id).await {
+                Err(_err) => return,
+                Ok(message) => message
             };
-            let mut default_embed = default_embed();
-            if next_track {
-                metadata.thumbnail.map(|str| default_embed.image(str));
-                metadata.title.map(|str| "**".to_owned() + &str + "**").map(|str| default_embed.title(str));
-                metadata.source_url.map(|url| default_embed.url(url));
-                let duration = match metadata.duration {
-                    Some(duration) => {
-                        let seconds = duration.as_secs() % 60;
-                        let minutes = (duration.as_secs() / 60) % 60;
-                        let hours = (duration.as_secs() / 60) / 60;
-                        let hrs = if hours == 0 { String::from("") } else if hours < 10 { format!("0{}:", hours) } else { format!("{}:", hours) };
 
-                        let mins = if minutes < 10 { format!("0{}:", minutes) } else { format!("{}:", minutes) };
-
-                        let secs = if seconds < 10 { format!("0{}", seconds) } else { format!("{}", seconds) };
-
-                        format!("**Duration:** {}{}{}", hrs, mins, secs)
-                    }
-                    None => String::from("**Duration:** N/A")
-                };
-                default_embed.footer(|f| f.text(format!("Looping: {} | Shuffling: {}", upcase_bool(music_state.looping), upcase_bool(music_state.shuffling))));
-                let uploader = match metadata.artist {
-                    None => String::from("**Uploader:** N/A"),
-                    Some(ref uploader) => format!("**Uploader:** {}", uploader)
-                };
-
-                if metadata.duration.is_some() || metadata.artist.is_some() {
-                    default_embed.description(format!("{} | {}", duration, uploader));
+            let edit_message = match action {
+                QueueAction::HardNext | QueueAction::Previous | QueueAction::SelectedNext => {
+                    menu::new_menu(music_state)
                 }
-            }
+                QueueAction::SoftNext | QueueAction::StateChange => {
+                    menu::modify_menu(&new_message, music_state)
+                }
+            };
 
-            match new_message.unwrap().edit(cache, |builder| {
-                if next_track { builder.set_embed(default_embed); }
-                builder.set_components(create_queue_component(&music_state.queue_names))
+            match new_message.edit(cache, |builder| {
+                *builder = edit_message;
+                builder
             }
             ).await {
                 Ok(_) => {}
@@ -185,29 +146,6 @@ impl InteractionManager {
     }
 }
 
-pub fn create_queue_component(queue_items: &Vec<QueueItem>) -> CreateComponents {
-    let mut default = default_components();
-    if queue_items.is_empty() { return default; }
-
-    let mut options = Vec::new();
-    for (i, item) in queue_items.iter().enumerate() {
-        let mut title = item.title.clone();
-        title.truncate(85);
-        options.push(CreateSelectMenuOption::new(format!("{}) {}", i+1, title), item.index));
-        if i == 24 { break; }
-    }
-
-
-    default.create_action_row(|queue_row|
-        queue_row.create_select_menu(|queue_menu| {
-            queue_menu
-                .placeholder("View Queue")
-                .custom_id("queue_select")
-                .options(|opt| opt.set_options(options))
-        }));
-    default
-}
-
 pub async fn handle_message(ctx: Context, msg: Message) -> Option<()> {
     let guild_id = msg.guild_id?;
     let acquire_lock = GUILD_REGISTRY.lock().await;
@@ -217,11 +155,10 @@ pub async fn handle_message(ctx: Context, msg: Message) -> Option<()> {
 
     msg.delete(&ctx).await.ok();
 
-    if guild_lock.music.is_none() {
-        guild_lock.music = MusicManager::new(&ctx, &msg, guild_id).await
-    }
+    let music = &mut guild_lock.music;
 
-    let mut music = guild_lock.music.as_mut()?;
+    music.try_join(&ctx, &msg, msg.guild(&ctx)).await;
+
     let search = msg.content;
     if search.ends_with("setup") { return None; }
 
@@ -231,78 +168,14 @@ pub async fn handle_message(ctx: Context, msg: Message) -> Option<()> {
         music.search_and_queue(search).await;
     }
 
-    let (metadata, next_track) = if !music.is_playing {
-        (music.change_track(QueueAction::SoftNext).await, true)
+    let (metadata, action) = if !music.is_playing {
+        (music.change_track(QueueAction::SoftNext).await, QueueAction::HardNext)
     } else {
         (
             MusicState { metadata: None, queue_names: music.get_items_in_queue(), looping: music.looping, shuffling: music.shuffling },
-            false
+            QueueAction::StateChange
         )
     };
-    guild_lock.interaction.as_mut()?.update_message(metadata, next_track).await;
+    guild_lock.interaction.as_mut()?.update_message(metadata, action).await;
     Some(())
-}
-
-pub fn default_embed() -> CreateEmbed {
-    let mut embed = CreateEmbed::default();
-    embed.title("No song currently playing")
-        .description(troll::random_ayaka_quote())
-        .color(Color::from_rgb(120, 107, 199))
-        .image("https://cdn.discordapp.com/attachments/893017931087245325/1047929174406471711/ayaka.PNG")
-        .footer(|footer| footer.text("Looping: False | Shuffling: False"));
-    embed
-
-}
-
-pub fn default_components() -> CreateComponents {
-    let mut components = CreateComponents::default();
-    components.create_action_row(|row| row
-            .create_button(|button| button
-                .style(ButtonStyle::Primary)
-                .custom_id("prev")
-                .emoji('⏮')
-            )
-            .create_button(|button| button
-                .style(ButtonStyle::Primary)
-                .custom_id("next")
-                .emoji('⏭')
-            )
-            .create_button(|button| button
-                .style(ButtonStyle::Primary)
-                .custom_id("stop")
-                .emoji('⏹')
-            )
-            .create_button(|button| button
-                .style(ButtonStyle::Secondary)
-                .custom_id("loop")
-                .emoji('🔁')
-            )
-            .create_button(|button| button
-                .style(ButtonStyle::Secondary)
-                .custom_id("shuffle")
-                .emoji('🔀')
-            )
-        ).create_action_row(|row| row
-        .create_button(|button| button
-            .style(ButtonStyle::Success)
-            .custom_id("APY")
-            .label("Add to Playlist")
-        )
-    );
-    components
-}
-
-async fn create_interaction(channel_id: ChannelId, http: Arc<Http>) -> serenity::Result<Message> {
-    channel_id.send_message(&http, |builder| builder
-        //.content("**__Queue List__**\nJoin a voice channel and queue songs by name or url by posting in this channel.")
-        .set_embed(default_embed())
-        .set_components(default_components())//.create_action_row(|row| row.create_select_menu(|menu| menu.placeholder("Queue").custom_id("Queue").options(|o| {*o = test_option(); o})))
-        ).await
-}
-
-fn upcase_bool(b: bool) -> String {
-    match b {
-        true => String::from("True"),
-        false => String::from("False")
-    }
 }

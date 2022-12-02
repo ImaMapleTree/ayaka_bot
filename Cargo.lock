@@ -1396,8 +1396,8 @@ dependencies = [
 
 [[package]]
 name = "songbird"
-version = "0.3.22-rc0"
-source = "git+https://github.com/ImaMapleTree/songbird#dd545496f701f296d0b44cd73886c0450b167b81"
+version = "0.3.22-rc2"
+source = "git+https://github.com/ImaMapleTree/songbird#9ef94d51fe8fd36c8afff1702042f7df9d9dee4a"
 dependencies = [
  "async-trait",
  "async-tungstenite",

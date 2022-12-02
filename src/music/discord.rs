@@ -1,13 +1,13 @@
-use std::future::Future;
+
 use std::sync::Arc;
 use serenity::client::Context;
-use serenity::model::channel::{Channel, GuildChannel, Message};
+use serenity::model::channel::{GuildChannel, Message};
 use serenity::model::guild::Guild;
 use serenity::model::id::ChannelId;
 use serenity::model::user::User;
 use songbird::{Call, Songbird};
-use songbird::error::JoinResult;
-use songbird::model::id::GuildId;
+
+
 use tokio::sync::Mutex;
 
 pub async fn join_channel(songbird: Arc<Songbird>, channel: GuildChannel) -> Arc<Mutex<Call>> {
@@ -16,10 +16,10 @@ pub async fn join_channel(songbird: Arc<Songbird>, channel: GuildChannel) -> Arc
 }
 
 pub async fn join_guild_channel_from_msg(ctx: &Context, message: &Message) -> (Option<Arc<Mutex<Call>>>, Option<Arc<Songbird>>) {
-    let guild = match message.guild(&ctx) {
+    let guild = match message.guild(ctx) {
         Some(guild) => guild,
         None => {
-            message.reply(ctx, "Cannot join non-guild channel");
+            message.reply(ctx, "Cannot join non-guild channel").await.ok();
             return (None, None);
         }
     };

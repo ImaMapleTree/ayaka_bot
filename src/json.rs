@@ -1,6 +1,6 @@
-use std::fs;
+
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use serde::Deserialize;
@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use tracing::error;
 use crate::guild::{GUILD_REGISTRY, GuildManager};
 
-const GUILD_JSON_FILE: &'static str = "guild_cache.json";
-const BACKUP_GUILD_JSON_FILE: &'static str = "guild_cache-backup.json";
+const GUILD_JSON_FILE: &str = "guild_cache.json";
+const BACKUP_GUILD_JSON_FILE: &str = "guild_cache-backup.json";
 lazy_static! {
     static ref SAVE_COUNT: AtomicUsize = AtomicUsize::default();
 }
@@ -80,7 +80,7 @@ pub async fn save_guilds_to_disk() {
     if count >= 4 {
         match File::options().truncate(true).write(true).create(true).open(BACKUP_GUILD_JSON_FILE) {
             Ok(mut file) => { file.write(guild_string.as_bytes()).ok(); },
-            Err(err) => {}
+            Err(_err) => {}
         };
         SAVE_COUNT.store(0, Ordering::SeqCst);
     }
