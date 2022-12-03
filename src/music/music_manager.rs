@@ -65,10 +65,10 @@ impl MusicManager {
         }
     }
 
-    pub async fn try_join(&mut self, context: &Context, message: &Message, guild: Option<Guild>) {
+    pub async fn try_join(&mut self, context: &Context, message: &Message, guild: Option<Guild>) -> Result<(), ()> {
         let mut new_handler = false;
         let guild = match guild {
-            None => return,
+            None => return Err(()),
             Some(guild) => guild
         };
         let guild_id = guild.id;
@@ -89,7 +89,10 @@ impl MusicManager {
             }
             None => {
                 new_handler = true;
-                join_guild_channel_from_msg(context, message).await.0
+                match join_guild_channel_from_msg(context, message).await.0 {
+                    None => return Err(()),
+                    Some(connection) => Some(connection)
+                }
             }
         };
         if new_handler && let Some(handler) = &self.handler {
@@ -99,6 +102,7 @@ impl MusicManager {
                     id: guild_id
                 });
         }
+        Ok(())
     }
 
     fn neaten_queue(&mut self) {

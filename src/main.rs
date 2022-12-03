@@ -27,18 +27,19 @@ use {
     std::env
 };
 
-// This trait adds the `register_songbird` and `register_songbird_with` methods
-// to the client builder below, making it easy to install this voice client.
-// The voice client can be retrieved in any commands using `songbird::get(ctx).await`.
 use songbird::SerenityInit;
 
-use serenity::{async_trait, client::{Client, EventHandler, Context}, framework::{
-    StandardFramework,
-    standard::{
-        CommandResult,
-        macros::{command, group},
+use serenity::{
+    async_trait,
+    client::{Client, EventHandler, Context},
+    framework::StandardFramework,
+    model::{
+        channel::Message,
+        gateway::Ready,
+        application::interaction::Interaction
     },
-}, model::{channel::Message, gateway::Ready, application::interaction::Interaction}, prelude::GatewayIntents};
+    prelude::GatewayIntents
+};
 
 use crate::{
     arcs::{CacheAndHttp, register_cache_and_http},

@@ -3,12 +3,7 @@ pub mod menu_defaults;
 
 use std::str::FromStr;
 
-
-
-
 use serenity::client::{Context};
-
-
 
 use serenity::model::channel::{Message};
 use serenity::model::id::{ChannelId, GuildId};
@@ -156,7 +151,9 @@ pub async fn handle_message(ctx: Context, msg: Message) -> Option<()> {
 
     let music = &mut guild_lock.music;
 
-    music.try_join(&ctx, &msg, msg.guild(&ctx)).await;
+    if music.try_join(&ctx, &msg, msg.guild(&ctx)).await.is_err() {
+        return None;
+    }
 
     let search = msg.content;
     if search.ends_with("setup") { return None; }
