@@ -77,9 +77,14 @@ impl MusicManager {
             Some(handler) => {
                 let mut opt_handler = Some(handler.clone());
                 let lock = handler.lock().await;
-                if !lock.current_channel().is_some_and(|c| get_user_vc(guild, message.author.clone()).is_some_and(|vc| vc.0 == c.0)) {
-                    new_handler = true;
-                    opt_handler = join_guild_channel_from_msg(context, message).await.0
+                let author_vc = get_user_vc(guild, message.author.clone());
+                if let Some(current_channel) = lock.current_channel() {
+                    if let Some(author_channel) = author_vc {
+                        if author_channel.0 != current_channel.0 {
+                            new_handler = true;
+                            opt_handler = join_guild_channel_from_msg(context, message).await.0
+                        }
+                    }
                 } opt_handler
             }
             None => {
@@ -129,8 +134,6 @@ impl MusicManager {
                 }
             }
         );
-
-        println!("Queue: {:?}", self.queue);
     }
 
     pub fn cut_line(&mut self, target: usize) {

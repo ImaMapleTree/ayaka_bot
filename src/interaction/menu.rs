@@ -52,10 +52,10 @@ pub fn modify_menu(current: &Message, music_state: MusicState) -> EditMessage<'s
     edit_message
         .add_embed(|em| {
             let em = em
-                .title(current_embed.title.clone().unwrap_or(MUSIC_EMBED_TITLE.to_string()))
-                .image(current_embed.image.clone().map(|img| img.url).unwrap_or(MUSIC_EMBED_IMAGE.to_string()))
+                .title(current_embed.title.clone().unwrap_or_else(|| MUSIC_EMBED_TITLE.to_string()))
+                .image(current_embed.image.clone().map(|img| img.url).unwrap_or_else(|| MUSIC_EMBED_IMAGE.to_string()))
                 .color(MUSIC_EMBED_COLOR)
-                .description(current_embed.description.clone().unwrap_or(troll::random_ayaka_quote().to_string()))
+                .description(current_embed.description.clone().unwrap_or_else(|| troll::random_ayaka_quote().to_string()))
                 .footer(|f| f.text(format!("Looping: {} | Shuffling: {}", upcase_bool(music_state.looping), upcase_bool(music_state.shuffling))));
             current_embed.clone().url.map(|url| em.url(url));
             em
